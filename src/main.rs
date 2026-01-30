@@ -112,23 +112,21 @@ where
                 Row::new(cells)
             }).collect();
 
-            let pm2_table = Table::new(
-                pm2_rows,
-                [
+            let pm2_table = Table::new(pm2_rows)
+                .widths(&[
                     Constraint::Percentage(30),
                     Constraint::Percentage(15),
                     Constraint::Percentage(20),
                     Constraint::Percentage(20),
                     Constraint::Percentage(15),
-                ]
-            )
-            .header(
+                ])
+                .header(
                 Row::new(vec!["Name", "PID", "Status", "Mem", "CPU"])
                     .style(Style::default().fg(Color::Yellow))
                     .bottom_margin(1)
             )
             .block(Block::default().title("PM2 Processes (↑/↓ to select)").borders(Borders::ALL))
-            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
             f.render_stateful_widget(pm2_table, top_chunks[0], pm2_state);
 
@@ -152,16 +150,14 @@ where
                 Row::new(cells)
             }).collect();
 
-            let net_table = Table::new(
-                net_rows,
-                [
+            let net_table = Table::new(net_rows)
+                .widths(&[
                     Constraint::Percentage(20),
                     Constraint::Percentage(10),
                     Constraint::Percentage(10),
                     Constraint::Percentage(10),
                     Constraint::Percentage(20),
-                ]
-            )
+                ])
             .header(
                 Row::new(vec!["Process", "PID", "Proto", "Port", "Firewall"])
                     .style(Style::default().fg(Color::Yellow))
