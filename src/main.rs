@@ -71,8 +71,6 @@ fn run_app<B: ratatui::backend::Backend>(
     last_tick: &mut Instant,
     tick_rate: Duration,
 ) -> io::Result<()>
-where
-    std::io::Error: From<B::Error>,
 {
     loop {
         // Fetch logs for selection if needed (could be optimized to not fetch every frame if no change)
@@ -112,21 +110,23 @@ where
                 Row::new(cells)
             }).collect();
 
-            let pm2_table = Table::new(pm2_rows)
-                .widths(&[
+            let pm2_table = Table::new(
+                pm2_rows,
+                [
                     Constraint::Percentage(30),
                     Constraint::Percentage(15),
                     Constraint::Percentage(20),
                     Constraint::Percentage(20),
                     Constraint::Percentage(15),
-                ])
+                ]
+            )
                 .header(
                 Row::new(vec!["Name", "PID", "Status", "Mem", "CPU"])
                     .style(Style::default().fg(Color::Yellow))
                     .bottom_margin(1)
             )
             .block(Block::default().title("PM2 Processes (↑/↓ to select)").borders(Borders::ALL))
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
             f.render_stateful_widget(pm2_table, top_chunks[0], pm2_state);
 
@@ -150,14 +150,16 @@ where
                 Row::new(cells)
             }).collect();
 
-            let net_table = Table::new(net_rows)
-                .widths(&[
+            let net_table = Table::new(
+                net_rows,
+                [
                     Constraint::Percentage(20),
                     Constraint::Percentage(10),
                     Constraint::Percentage(10),
                     Constraint::Percentage(10),
                     Constraint::Percentage(20),
-                ])
+                ]
+            )
             .header(
                 Row::new(vec!["Process", "PID", "Proto", "Port", "Firewall"])
                     .style(Style::default().fg(Color::Yellow))
