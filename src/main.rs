@@ -138,6 +138,8 @@ fn run_app<B: ratatui::backend::Backend>(
                     FirewallStatus::Deny => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     FirewallStatus::Limit => Style::default().fg(Color::Yellow),
                     FirewallStatus::Unknown => Style::default().fg(Color::Gray),
+                    FirewallStatus::PermissionDenied => Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD), // Distinct color for permissions
+                    FirewallStatus::Error(_) => Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC),
                 };
                 
                 let cells = vec![

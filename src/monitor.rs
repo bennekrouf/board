@@ -13,6 +13,8 @@ pub enum FirewallStatus {
     Unknown,
     Limit, // ufw 'LIMIT'
     Deny, // ufw 'DENY'
+    PermissionDenied,
+    Error(String),
 }
 
 #[derive(Debug, Clone)]
@@ -145,17 +147,48 @@ fn fetch_mock_pm2_data() -> Vec<Pm2Process> {
 
 #[cfg(target_os = "linux")]
 fn fetch_pm2_data() -> Vec<Pm2Process> {
-    // Command: pm2 jlist
-    let output = match Command::new("pm2")
-        .arg("jlist")
+    // Use sh -c to ensure we pick up the user's PATH where pm2 might be installed
+    let output = match Command::new("sh")
+        .arg("-c")
+        .arg("pm2 jlist")
         .output() {
-        Ok(o) => o.stdout,
-        Err(_) => return vec![],
+        Ok(o) => o,
+        Err(e) => {
+            return vec![Pm2Process {
+                name: "PM2 Exec Error".to_string(),
+                pid: "0".to_string(),
+                status: "Error".to_string(),
+                memory: "0 B".to_string(),
+                cpu: "0%".to_string(),
+                log_path: "".to_string(),
+            }]
+        }
     };
 
-    let raw: Vec<Pm2RawEntry> = match serde_json::from_slice(&output) {
+    if !output.status.success() {
+         let stderr = String::from_utf8_lossy(&output.stderr);
+         return vec![Pm2Process {
+                name: "PM2 Failed".to_string(),
+                pid: "0".to_string(),
+                status: "Error".to_string(),
+                memory: "0 B".to_string(),
+                cpu: "0%".to_string(),
+                log_path: "".to_string(), // Could put stderr here if we had a way to show it
+            }];
+    }
+
+    let raw: Vec<Pm2RawEntry> = match serde_json::from_slice(&output.stdout) {
         Ok(r) => r,
-        Err(_) => return vec![],
+        Err(e) => {
+             return vec![Pm2Process {
+                name: "PM2 Parse Error".to_string(),
+                pid: "0".to_string(),
+                status: "Error".to_string(),
+                memory: "0 B".to_string(),
+                cpu: "0%".to_string(),
+                log_path: "".to_string(),
+            }];
+        },
     };
 
     raw.into_iter().map(|r| {
@@ -247,14 +280,67 @@ fn fetch_linux_data() -> Vec<NetworkEntry> {
     let ufw_output = match Command::new("sudo")
         .args(&["ufw", "status"])
         .output() {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
-        Err(_) => "".to_string(),
+        Ok(o) => {
+            if o.status.success() {
+                String::from_utf8_lossy(&o.stdout).to_string()
+            } else {
+                let stderr = String::from_utf8_lossy(&o.stderr).to_string();
+                if stderr.contains("root") || stderr.contains("permission") {
+                     // Set all to PermissionDenied
+                     for entry in entries.iter_mut() {
+                         entry.firewall_status = FirewallStatus::PermissionDenied;
+                     }
+                } else {
+                     // Set all to Error
+                     for entry in entries.iter_mut() {
+                         entry.firewall_status = FirewallStatus::Error(stderr.clone());
+                     }
+                }
+                return entries;
+            }
+        },
+        Err(e) => {
+             for entry in entries.iter_mut() {
+                 entry.firewall_status = FirewallStatus::Error(format!("Exec failed: {}", e));
+             }
+             return entries;
+        }
     };
     
     // Parse UFW and update entries
     update_firewall_status(&mut entries, &ufw_output);
 
     entries
+}
+
+#[cfg(target_os = "linux")]
+fn get_proc_cmdline(pid: &str) -> Option<String> {
+    let path = format!("/proc/{}/cmdline", pid);
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            // cmdline is null-separated
+            let args: Vec<&str> = content.split('\0').collect();
+            if args.is_empty() { return None; }
+            
+            // Return "binary arg1" or just "binary"
+            // Filter out empty strings which can happen with split('\0')
+            let valid_args: Vec<&str> = args.into_iter().filter(|s| !s.is_empty()).collect();
+            
+            if valid_args.is_empty() { return None; }
+
+            let binary = std::path::Path::new(valid_args[0])
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(valid_args[0]);
+
+            if valid_args.len() > 1 {
+                Some(format!("{} {}", binary, valid_args[1]))
+            } else {
+                Some(binary.to_string())
+            }
+        },
+        Err(_) => None,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -270,12 +356,6 @@ fn parse_ss_output(output: &str) -> Vec<NetworkEntry> {
     // Actually `ss -lntu` output is:
     // Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
     // tcp   LISTEN 0      128    0.0.0.0:22         0.0.0.0:*         users:(("sshd",pid=123,fd=3))
-    
-    // If we use -lntupH, the first column is Netid (udp/tcp) because we used -u -t?
-    // Let's verify standard `ss` output.
-    // `ss -lntu` on linux:
-    // Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process
-    // udp   UNCONN 0      0             0.0.0.0:5353          0.0.0.0:*    users:(("avahi-daemon",pid=577,fd=12))
     
     // So column 0 is Netid (udp/tcp).
     // Column 4 is Local Address:Port
@@ -296,17 +376,30 @@ fn parse_ss_output(output: &str) -> Vec<NetworkEntry> {
 
         // Parse Process and PID
         // users:(("sshd",pid=765,fd=3))
-        let proc_regex = Regex::new(r#"users:\(\("([^"]+)",pid=(\d+)"#).unwrap();
+        // Relaxed regex to handle potential variations
+        let proc_regex = Regex::new(r#"users:\(\("?([^",]+)"?,pid=(\d+)"#).unwrap();
         let (name, pid) = if let Some(caps) = proc_regex.captures(&process_info) {
             (caps[1].to_string(), caps[2].to_string())
         } else {
-            ("-".to_string(), "-".to_string())
+             // Fallback: try to see if there is any user info
+             if process_info.contains("users:") {
+                 ("?".to_string(), "?".to_string())
+             } else {
+                 ("-".to_string(), "-".to_string())
+             }
+        };
+
+        // Try to get enhanced process name with args
+        let enhanced_name = if pid != "?" && pid != "-" {
+             get_proc_cmdline(&pid).unwrap_or(name)
+        } else {
+             name
         };
 
         entries.push(NetworkEntry {
             protocol: netid.to_string(),
             port,
-            process: name,
+            process: enhanced_name,
             pid,
             firewall_status: FirewallStatus::Unknown, // Default
         });
@@ -324,8 +417,11 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 2 { continue; }
         
+        // Skip header lines
+        if line.starts_with("To") || line.starts_with("--") { continue; }
+        
         let port_proto = parts[0]; // "22/tcp" or "22"
-        let action = parts[1]; // "ALLOW", "DENY", "LIMIT" (sometimes action is column 2 if To is multi-word? No usually column 2)
+        let action = parts[1]; // "ALLOW", "DENY", "LIMIT"
         
         // Handle "22/tcp" split
         let (port_str, proto) = if port_proto.contains('/') {
@@ -356,9 +452,7 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
                          entry.firewall_status = status.clone();
                     }
                 } else {
-                    // If UFW doesn't specify (e.g. "22"), it applies to both? or defaults?
-                    // "22" in ufw usually means tcp+udp or just tcp?
-                    // Actually `ufw allow 22` allows both.
+                    // If UFW doesn't specify (e.g. "22"), it applies to both TCP and UDP by default
                     entry.firewall_status = status.clone();
                 }
             }
