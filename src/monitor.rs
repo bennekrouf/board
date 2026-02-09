@@ -249,6 +249,32 @@ fn fetch_mock_data() -> Vec<NetworkEntry> {
 }
 
 #[cfg(target_os = "linux")]
+pub fn restart_process(name: &str) {
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(format!("pm2 restart {}", name))
+        .output();
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn restart_process(name: &str) {
+    println!("Mock restart: {}", name);
+}
+
+#[cfg(target_os = "linux")]
+pub fn delete_process(name: &str) {
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(format!("pm2 delete {}", name))
+        .output();
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn delete_process(name: &str) {
+    println!("Mock delete: {}", name);
+}
+
+#[cfg(target_os = "linux")]
 fn fetch_linux_data() -> Vec<NetworkEntry> {
     // 1. Fetch Listening Ports via `ss`
     // Command: ss -lntupH
@@ -413,10 +439,6 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
     // or "22  ALLOW Anywhere" (implies both tcp/udp often)
     
     // Very naive parser
-    let mut debug_log = String::new();
-    debug_log.push_str(&format!("UFW Output:\n{}\n", ufw_output));
-    
-    // Very naive parser
     for line in ufw_output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 2 { continue; }
@@ -454,32 +476,20 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
             _ => FirewallStatus::Unknown,
         };
 
-        debug_log.push_str(&format!("Parsed UFW: port={} proto={:?} action={} status={:?}\n", ufw_port, proto, action, status));
-
         // Update matching entries
         for entry in entries.iter_mut() {
             if entry.port == ufw_port {
-                debug_log.push_str(&format!("  Matching against entry: port={} proto={}... ", entry.port, entry.protocol));
-                
                 if let Some(p) = proto {
                     // Normalize tcp6/udp6 to tcp/udp for comparison
                     let entry_proto_norm = entry.protocol.replace("6", "");
                     
                     if entry.protocol == p || entry_proto_norm == p {
                          entry.firewall_status = status.clone();
-                         debug_log.push_str("MATCH!\n");
-                    } else {
-                         debug_log.push_str(&format!("NO MATCH (proto mismatch: {} vs {})\n", entry.protocol, p));
                     }
                 } else {
                     entry.firewall_status = status.clone();
-                    debug_log.push_str("MATCH (any proto)!\n");
                 }
             }
         }
-    }
-    use std::io::Write;
-    if let Ok(mut file) = std::fs::File::create("/tmp/board_debug.log") {
-        let _ = file.write_all(debug_log.as_bytes());
     }
 }

@@ -15,7 +15,7 @@ use ratatui::{
     Terminal,
 };
 use std::{io, time::{Duration, Instant}};
-use monitor::{fetch_data, NetworkEntry, FirewallStatus, Pm2Process, get_process_logs};
+use monitor::{fetch_data, NetworkEntry, FirewallStatus, Pm2Process, get_process_logs, restart_process, delete_process};
 
 #[derive(PartialEq)]
 enum Focus {
@@ -138,7 +138,7 @@ fn run_app<B: ratatui::backend::Backend>(
                     .bottom_margin(1)
             )
             .block(Block::default()
-                .title("PM2 Processes (↑/↓ to select, Tab for Logs)")
+                .title("PM2 Processes (↑/↓ to select, r: restart, d: delete, Tab: Logs)")
                 .borders(Borders::ALL)
                 .border_style(if *focus == Focus::ProcessList { Style::default().fg(Color::Yellow) } else { Style::default() }))
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -216,6 +216,23 @@ fn run_app<B: ratatui::backend::Backend>(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('r') if *focus == Focus::ProcessList => {
+                        if let Some(i) = pm2_state.selected() {
+                            if i < pm2_entries.len() {
+                                restart_process(&pm2_entries[i].name);
+                                *last_tick = Instant::now(); // Force quicker refresh? Actually fetching takes time. 
+                                // Let's just wait for next tick or maybe fetching immediately causes lag?
+                                // The command is blocking, so fetching right after might be good to show status change if fast enough.
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') if *focus == Focus::ProcessList => {
+                         if let Some(i) = pm2_state.selected() {
+                            if i < pm2_entries.len() {
+                                delete_process(&pm2_entries[i].name);
+                            }
+                        }
+                    }
                     KeyCode::Tab => {
                         *focus = match focus {
                             Focus::ProcessList => Focus::Logs,
