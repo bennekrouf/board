@@ -413,6 +413,10 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
     // or "22  ALLOW Anywhere" (implies both tcp/udp often)
     
     // Very naive parser
+    let mut debug_log = String::new();
+    debug_log.push_str(&format!("UFW Output:\n{}\n", ufw_output));
+    
+    // Very naive parser
     for line in ufw_output.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() < 2 { continue; }
@@ -423,6 +427,15 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
         let port_proto = parts[0]; // "22/tcp" or "22"
         let action = parts[1]; // "ALLOW", "DENY", "LIMIT"
         
+        // Handle (v6) which shifts action to parts[2]
+        // Example: 22/tcp (v6) ALLOW Anywhere (v6)
+        let (action, _is_v6) = if action == "(v6)" {
+            if parts.len() < 3 { continue; }
+            (parts[2], true)
+        } else {
+            (action, false)
+        };
+
         // Handle "22/tcp" split
         let (port_str, proto) = if port_proto.contains('/') {
             let mut s = port_proto.split('/');
@@ -441,21 +454,32 @@ fn update_firewall_status(entries: &mut Vec<NetworkEntry>, ufw_output: &str) {
             _ => FirewallStatus::Unknown,
         };
 
+        debug_log.push_str(&format!("Parsed UFW: port={} proto={:?} action={} status={:?}\n", ufw_port, proto, action, status));
+
         // Update matching entries
         for entry in entries.iter_mut() {
             if entry.port == ufw_port {
+                debug_log.push_str(&format!("  Matching against entry: port={} proto={}... ", entry.port, entry.protocol));
+                
                 if let Some(p) = proto {
-                    // If UFW specifies proto, match it
-                    // ufw: tcp, entry: tcp -> match
-                    // ufw: v6, entry: ... ignore v6 specific lines for now unless we handle IPv6 well
-                    if entry.protocol == p {
+                    // Normalize tcp6/udp6 to tcp/udp for comparison
+                    let entry_proto_norm = entry.protocol.replace("6", "");
+                    
+                    if entry.protocol == p || entry_proto_norm == p {
                          entry.firewall_status = status.clone();
+                         debug_log.push_str("MATCH!\n");
+                    } else {
+                         debug_log.push_str(&format!("NO MATCH (proto mismatch: {} vs {})\n", entry.protocol, p));
                     }
                 } else {
-                    // If UFW doesn't specify (e.g. "22"), it applies to both TCP and UDP by default
                     entry.firewall_status = status.clone();
+                    debug_log.push_str("MATCH (any proto)!\n");
                 }
             }
         }
+    }
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::File::create("/tmp/board_debug.log") {
+        let _ = file.write_all(debug_log.as_bytes());
     }
 }
