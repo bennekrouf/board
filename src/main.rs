@@ -17,6 +17,12 @@ use ratatui::{
 use std::{io, time::{Duration, Instant}};
 use monitor::{fetch_data, NetworkEntry, FirewallStatus, Pm2Process, get_process_logs};
 
+#[derive(PartialEq)]
+enum Focus {
+    ProcessList,
+    Logs,
+}
+
 fn main() -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -37,6 +43,8 @@ fn main() -> anyhow::Result<()> {
     
     // Logs State
     let mut logs: Vec<String> = Vec::new();
+    let mut log_scroll_state = 0u16;
+    let mut focus = Focus::ProcessList;
 
     let res = run_app(
         &mut terminal,
@@ -44,6 +52,8 @@ fn main() -> anyhow::Result<()> {
         &mut pm2_entries,
         &mut pm2_state,
         &mut logs,
+        &mut log_scroll_state,
+        &mut focus,
         &mut last_tick,
         tick_rate
     );
@@ -68,6 +78,8 @@ fn run_app<B: ratatui::backend::Backend>(
     pm2_entries: &mut Vec<Pm2Process>,
     pm2_state: &mut TableState,
     logs: &mut Vec<String>,
+    log_scroll: &mut u16,
+    focus: &mut Focus,
     last_tick: &mut Instant,
     tick_rate: Duration,
 ) -> io::Result<()>
@@ -125,7 +137,10 @@ fn run_app<B: ratatui::backend::Backend>(
                     .style(Style::default().fg(Color::Yellow))
                     .bottom_margin(1)
             )
-            .block(Block::default().title("PM2 Processes (↑/↓ to select)").borders(Borders::ALL))
+            .block(Block::default()
+                .title("PM2 Processes (↑/↓ to select, Tab for Logs)")
+                .borders(Borders::ALL)
+                .border_style(if *focus == Focus::ProcessList { Style::default().fg(Color::Yellow) } else { Style::default() }))
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
             f.render_stateful_widget(pm2_table, top_chunks[0], pm2_state);
@@ -184,7 +199,11 @@ fn run_app<B: ratatui::backend::Backend>(
             };
             
             let log_paragraph = Paragraph::new(log_text)
-                .block(Block::default().title(selected_name).borders(Borders::ALL));
+                .block(Block::default()
+                    .title(selected_name)
+                    .borders(Borders::ALL)
+                    .border_style(if *focus == Focus::Logs { Style::default().fg(Color::Yellow) } else { Style::default() }))
+                .scroll((*log_scroll, 0));
             f.render_widget(log_paragraph, main_chunks[1]);
             
         })?;
@@ -197,33 +216,54 @@ fn run_app<B: ratatui::backend::Backend>(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Down => {
-                         let next = match pm2_state.selected() {
-                            Some(i) => {
-                                if i >= pm2_entries.len().saturating_sub(1) {
-                                    0
-                                } else {
-                                    i + 1
-                                }
-                            }
-                            None => 0,
+                    KeyCode::Tab => {
+                        *focus = match focus {
+                            Focus::ProcessList => Focus::Logs,
+                            Focus::Logs => Focus::ProcessList,
                         };
-                        pm2_state.select(Some(next));
-                        update_logs(pm2_entries, pm2_state, logs);
+                    }
+                    KeyCode::Down => {
+                        if let Ok(size) = terminal.size() {
+                             // Approximation of log pane height based on layout (50% - margins)
+                             let log_area_height = size.height.saturating_sub(2) / 2;
+                             // We want to see the bottom, so scroll = total lines - height
+                             // But we need to update logs first to know total lines
+                             update_logs(pm2_entries, pm2_state, logs);
+                             *log_scroll = (logs.len() as u16).saturating_sub(log_area_height).saturating_sub(2); // -2 for borders
+                        } else {
+                            update_logs(pm2_entries, pm2_state, logs);
+                            *log_scroll = 0; 
+                        }
                     }
                     KeyCode::Up => {
-                        let next = match pm2_state.selected() {
-                            Some(i) => {
-                                if i == 0 {
-                                    0
+                        match focus {
+                            Focus::ProcessList => {
+                                let next = match pm2_state.selected() {
+                                    Some(i) => {
+                                        if i == 0 {
+                                            0
+                                        } else {
+                                            i - 1
+                                        }
+                                    }
+                                    None => 0,
+                                };
+                                pm2_state.select(Some(next));
+                                
+                                // Auto-scroll to bottom on change
+                                if let Ok(size) = terminal.size() {
+                                     let log_area_height = size.height.saturating_sub(2) / 2;
+                                     update_logs(pm2_entries, pm2_state, logs);
+                                     *log_scroll = (logs.len() as u16).saturating_sub(log_area_height).saturating_sub(2);
                                 } else {
-                                    i - 1
+                                    update_logs(pm2_entries, pm2_state, logs);
+                                    *log_scroll = 0;
                                 }
                             }
-                            None => 0,
-                        };
-                        pm2_state.select(Some(next));
-                         update_logs(pm2_entries, pm2_state, logs);
+                            Focus::Logs => {
+                                *log_scroll = log_scroll.saturating_sub(1);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -241,7 +281,18 @@ fn run_app<B: ratatui::backend::Backend>(
                     pm2_state.select(Some(pm2_entries.len() - 1));
                 }
             }
+             // NOTE: We might want to keep scroll position relevant if we are "tailing"
+             // For now, let's just refresh content. 
+             // Ideally if we are at bottom, stay at bottom. 
+             // Let's defer "auto-tailing" logic for now to keep it simple, 
+             // or just re-calc "bottom" if we were already at bottom? 
+             // Re-fetching logs:
              update_logs(pm2_entries, pm2_state, logs);
+             // If we want to simple "tail", we could check if log_scroll was near bottom.
+             // But simpler: just update logs. If content grows, scroll stays same -> user sees older stuff.
+             // If user wants to tail, they usually stay at bottom.
+             // Let's leave scroll as is during tick updates for now.
+             
             *last_tick = Instant::now();
         }
     }
@@ -251,7 +302,7 @@ fn update_logs(entries: &[Pm2Process], state: &TableState, logs: &mut Vec<String
     if let Some(i) = state.selected() {
         if i < entries.len() {
             let entry = &entries[i];
-            *logs = get_process_logs(&entry.log_path, 20); // 20 lines
+            *logs = get_process_logs(&entry.log_path, 200); // Fetch 200 lines
         } else {
              logs.clear();
         }
