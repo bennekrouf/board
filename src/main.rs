@@ -215,7 +215,7 @@ fn run_app<B: ratatui::backend::Backend>(
                         let next = match pm2_state.selected() {
                             Some(i) => {
                                 if i == 0 {
-                                    pm2_entries.len().saturating_sub(1)
+                                    0
                                 } else {
                                     i - 1
                                 }
