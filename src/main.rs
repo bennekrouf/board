@@ -15,12 +15,23 @@ use ratatui::{
     Terminal,
 };
 use std::{io, time::{Duration, Instant}};
+use std::sync::mpsc;
+use std::thread;
 use monitor::{fetch_data, NetworkEntry, FirewallStatus, Pm2Process, get_process_logs, restart_process, delete_process};
 
 #[derive(PartialEq)]
 enum Focus {
     ProcessList,
     Logs,
+}
+
+enum ActionState {
+    Idle,
+    Processing(String), // Message to show
+}
+
+enum ActionSignal {
+    Done(Result<String, String>), // Success message or Error
 }
 
 fn main() -> anyhow::Result<()> {
@@ -46,6 +57,12 @@ fn main() -> anyhow::Result<()> {
     let mut log_scroll_state = 0u16;
     let mut focus = Focus::ProcessList;
 
+    // Async Action State
+    let (tx, rx) = mpsc::channel();
+    let mut action_state = ActionState::Idle;
+    let spinner_frames = vec!["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let mut spinner_index = 0;
+
     let res = run_app(
         &mut terminal,
         &mut net_entries,
@@ -55,7 +72,12 @@ fn main() -> anyhow::Result<()> {
         &mut log_scroll_state,
         &mut focus,
         &mut last_tick,
-        tick_rate
+        tick_rate,
+        tx,
+        rx,
+        &mut action_state,
+        &spinner_frames,
+        &mut spinner_index,
     );
 
     disable_raw_mode()?;
@@ -82,6 +104,11 @@ fn run_app<B: ratatui::backend::Backend>(
     focus: &mut Focus,
     last_tick: &mut Instant,
     tick_rate: Duration,
+    action_tx: mpsc::Sender<ActionSignal>,
+    action_rx: mpsc::Receiver<ActionSignal>,
+    action_state: &mut ActionState,
+    spinner_frames: &[&str],
+    spinner_index: &mut usize,
 ) -> io::Result<()>
 {
     loop {
@@ -144,6 +171,20 @@ fn run_app<B: ratatui::backend::Backend>(
             .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
             f.render_stateful_widget(pm2_table, top_chunks[0], pm2_state);
+            
+            // Render Action Spinner/Status if processing
+            if let ActionState::Processing(msg) = action_state {
+                let spinner = spinner_frames[*spinner_index];
+                let status_msg = format!("{} {}", spinner, msg);
+                let processing_block = Paragraph::new(status_msg)
+                    .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+                    .block(Block::default().borders(Borders::ALL).title("Status"));
+                
+                // Overlay or just put it somewhere? Let's put it in a small rect in the middle
+                let area = centered_rect(60, 20, f.area());
+                f.render_widget(ratatui::widgets::Clear, area); // Clear background
+                f.render_widget(processing_block, area);
+            }
 
             // --- Network Table (Top Right) ---
             let net_rows: Vec<Row> = net_entries.iter().map(|entry| {
@@ -212,24 +253,63 @@ fn run_app<B: ratatui::backend::Backend>(
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_secs(0));
 
+        if let Ok(signal) = action_rx.try_recv() {
+             match signal {
+                 ActionSignal::Done(res) => {
+                     match res {
+                         Ok(_) => *action_state = ActionState::Idle,
+                         Err(e) => *action_state = ActionState::Idle, // Could show error in a toast/log
+                     }
+                      // Refresh data immediately after action done
+                     *last_tick = Instant::now();
+                     let (new_net, new_pm2) = fetch_data();
+                     *net_entries = new_net;
+                     *pm2_entries = new_pm2;
+                 }
+             }
+        }
+        
+        // Advance spinner
+        if let ActionState::Processing(_) = action_state {
+            *spinner_index = (*spinner_index + 1) % spinner_frames.len();
+        }
+
         if crossterm::event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
+                // Block input (except quit?) while processing? 
+                // Let's allow quit, but block others to prevent spamming actions
+                if let ActionState::Processing(_) = action_state {
+                     if key.code == KeyCode::Char('q') { return Ok(()); }
+                     continue; 
+                }
+
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Char('r') if *focus == Focus::ProcessList => {
                         if let Some(i) = pm2_state.selected() {
                             if i < pm2_entries.len() {
-                                restart_process(&pm2_entries[i].name);
-                                *last_tick = Instant::now(); // Force quicker refresh? Actually fetching takes time. 
-                                // Let's just wait for next tick or maybe fetching immediately causes lag?
-                                // The command is blocking, so fetching right after might be good to show status change if fast enough.
+                                let name = pm2_entries[i].name.clone();
+                                let tx = action_tx.clone();
+                                *action_state = ActionState::Processing(format!("Restarting {}...", name));
+                                
+                                thread::spawn(move || {
+                                    let res = restart_process(&name);
+                                    let _ = tx.send(ActionSignal::Done(res));
+                                });
                             }
                         }
                     }
                     KeyCode::Char('d') if *focus == Focus::ProcessList => {
                          if let Some(i) = pm2_state.selected() {
                             if i < pm2_entries.len() {
-                                delete_process(&pm2_entries[i].name);
+                                let name = pm2_entries[i].name.clone();
+                                let tx = action_tx.clone();
+                                *action_state = ActionState::Processing(format!("Deleting {}...", name));
+                                
+                                thread::spawn(move || {
+                                    let res = delete_process(&name);
+                                    let _ = tx.send(ActionSignal::Done(res));
+                                });
                             }
                         }
                     }
@@ -342,4 +422,25 @@ fn update_logs(entries: &[Pm2Process], state: &TableState, logs: &mut Vec<String
     } else {
         logs.clear();
     }
+}
+
+// Helper for centering the popup
+fn centered_rect(percent_x: u16, percent_y: u16, r: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ].as_ref())
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ].as_ref())
+        .split(popup_layout[1])[1]
 }

@@ -249,29 +249,70 @@ fn fetch_mock_data() -> Vec<NetworkEntry> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn restart_process(name: &str) {
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(format!("pm2 restart {}", name))
-        .output();
+pub fn restart_process(name: &str) -> Result<String, String> {
+    let cmd = format!("pm2 restart '{}'", name);
+    // Debug log
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/board_debug.log") {
+        let _ = writeln!(file, "Executing restart: {}", cmd);
+    }
+
+    match Command::new("sh").arg("-c").arg(&cmd).output() {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr).to_string();
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/board_debug.log") {
+                    let _ = writeln!(file, "Restart failed: {}", err);
+                }
+                Err(err)
+            }
+        }
+        Err(e) => {
+             let err = format!("Failed to execute command: {}", e);
+             if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/board_debug.log") {
+                let _ = writeln!(file, "Restart exec error: {}", err);
+            }
+            Err(err)
+        }
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn restart_process(name: &str) {
+pub fn restart_process(name: &str) -> Result<String, String> {
+    std::thread::sleep(std::time::Duration::from_secs(1)); // Simulate delay
     println!("Mock restart: {}", name);
+    Ok(format!("Mock restarted {}", name))
 }
 
 #[cfg(target_os = "linux")]
-pub fn delete_process(name: &str) {
-    let _ = Command::new("sh")
-        .arg("-c")
-        .arg(format!("pm2 delete {}", name))
-        .output();
+pub fn delete_process(name: &str) -> Result<String, String> {
+    let cmd = format!("pm2 delete '{}'", name);
+     // Debug log
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/board_debug.log") {
+        let _ = writeln!(file, "Executing delete: {}", cmd);
+    }
+    
+    match Command::new("sh").arg("-c").arg(&cmd).output() {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).to_string())
+            } else {
+                let err = String::from_utf8_lossy(&output.stderr).to_string();
+                Err(err)
+            }
+        }
+        Err(e) => Err(format!("Failed to execute command: {}", e)),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn delete_process(name: &str) {
+pub fn delete_process(name: &str) -> Result<String, String> {
+    std::thread::sleep(std::time::Duration::from_secs(1)); // Simulate delay
     println!("Mock delete: {}", name);
+    Ok(format!("Mock deleted {}", name))
 }
 
 #[cfg(target_os = "linux")]
