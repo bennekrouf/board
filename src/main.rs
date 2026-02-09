@@ -223,16 +223,32 @@ fn run_app<B: ratatui::backend::Backend>(
                         };
                     }
                     KeyCode::Down => {
-                        if let Ok(size) = terminal.size() {
-                             // Approximation of log pane height based on layout (50% - margins)
-                             let log_area_height = size.height.saturating_sub(2) / 2;
-                             // We want to see the bottom, so scroll = total lines - height
-                             // But we need to update logs first to know total lines
-                             update_logs(pm2_entries, pm2_state, logs);
-                             *log_scroll = (logs.len() as u16).saturating_sub(log_area_height).saturating_sub(2); // -2 for borders
-                        } else {
-                            update_logs(pm2_entries, pm2_state, logs);
-                            *log_scroll = 0; 
+                        match focus {
+                            Focus::ProcessList => {
+                                let next = match pm2_state.selected() {
+                                    Some(i) => {
+                                        if i >= pm2_entries.len().saturating_sub(1) {
+                                            0
+                                        } else {
+                                            i + 1
+                                        }
+                                    }
+                                    None => 0,
+                                };
+                                pm2_state.select(Some(next));
+                                
+                                if let Ok(size) = terminal.size() {
+                                     let log_area_height = size.height.saturating_sub(2) / 2;
+                                     update_logs(pm2_entries, pm2_state, logs);
+                                     *log_scroll = (logs.len() as u16).saturating_sub(log_area_height).saturating_sub(2); 
+                                } else {
+                                    update_logs(pm2_entries, pm2_state, logs);
+                                    *log_scroll = 0; 
+                                }
+                            }
+                            Focus::Logs => {
+                                *log_scroll = log_scroll.saturating_add(1);
+                            }
                         }
                     }
                     KeyCode::Up => {
